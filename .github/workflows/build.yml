@@ -1,0 +1,108 @@
+name: Build unsigned offline IPA
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+
+      - name: Fetch H5 bundle
+        run: |
+          set -euo pipefail
+          python3 tools/fetch_h5.py Resources/www/h5
+          du -sh Resources/www/h5
+          ls Resources/www/h5
+
+      - name: Prepare app icon
+        run: |
+          set -euo pipefail
+          mkdir -p Sources/Assets.xcassets/AppIcon.appiconset
+          echo '{"info":{"author":"xcode","version":1}}' > Sources/Assets.xcassets/Contents.json
+          echo '{"images":[{"filename":"icon-1024.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > Sources/Assets.xcassets/AppIcon.appiconset/Contents.json
+          cp Resources/www/h5/static/logo.png /tmp/logo.png
+          sips -s format png -z 1024 1024 /tmp/logo.png --out Sources/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+
+      - name: Generate Xcode project
+        run: |
+          xcodegen generate 2>&1 | tee xcodegen.log
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project AnxinRent.xcodeproj \
+            -scheme AnxinRent \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/AnxinRent.app"
+          test -d "$APP"
+          echo "--- 包内资源检查 ---"
+          test -f "$APP/www/h5/index.html"
+          du -sh "$APP/www"
+          find "$APP/www" -type f | wc -l
+          rm -rf Payload AnxinRent.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry AnxinRent.ipa Payload
+          ls -lh AnxinRent.ipa
+          echo "--- Info.plist ---"
+          for k in CFBundleIdentifier CFBundleDisplayName CFBundleShortVersionString CFBundleVersion MinimumOSVersion; do
+            printf '%s = ' "$k"; /usr/libexec/PlistBuddy -c "Print :$k" "$APP/Info.plist" || echo "(missing)"
+          done
+          echo "--- 签名状态 ---"
+          codesign -dv "$APP" 2>&1 || echo "未签名（符合预期）"
+          lipo -info "$APP/AnxinRent"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnxinRent-offline-ipa
+          path: AnxinRent.ipa
+          retention-days: 30
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v1.0.7-offline"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" AnxinRent.ipa \
+            --title "安心租房 iOS V1.0.7 离线版 未签名 IPA" \
+            --notes "H5 资源在包内，断网也能打开界面；接口经壳内代理转发。未签名，需用爱思助手 / Sideloadly 重签名后安装。"
+
+      - name: Report failure to issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "运行号：$GITHUB_RUN_ID"
+            echo ''
+            echo '```'
+            tail -n 150 build.log 2>/dev/null || echo "(no build.log)"
+            echo '```'
+          } > fail-report.md
+          gh issue create --title "构建失败 run-$GITHUB_RUN_ID" --body-file fail-report.md || true
