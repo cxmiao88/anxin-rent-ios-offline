@@ -17,14 +17,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install XcodeGen
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen 2>&1 | tee xcodegen-install.log
 
       - name: Fetch H5 bundle
         run: |
-          set -euo pipefail
-          python3 tools/fetch_h5.py Resources/www/h5
-          du -sh Resources/www/h5
-          ls Resources/www/h5
+          python3 --version 2>&1 | tee fetch.log
+          python3 tools/fetch_h5.py Resources/www/h5 2>&1 | tee -a fetch.log
+          du -sh Resources/www/h5 2>&1 | tee -a fetch.log
+          ls Resources/www/h5 2>&1 | tee -a fetch.log
 
       - name: Prepare app icon
         run: |
@@ -33,11 +33,10 @@ jobs:
           echo '{"info":{"author":"xcode","version":1}}' > Sources/Assets.xcassets/Contents.json
           echo '{"images":[{"filename":"icon-1024.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > Sources/Assets.xcassets/AppIcon.appiconset/Contents.json
           cp Resources/www/h5/static/logo.png /tmp/logo.png
-          sips -s format png -z 1024 1024 /tmp/logo.png --out Sources/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+          sips -s format png -z 1024 1024 /tmp/logo.png --out Sources/Assets.xcassets/AppIcon.appiconset/icon-1024.png 2>&1 | tee icon.log
 
       - name: Generate Xcode project
-        run: |
-          xcodegen generate 2>&1 | tee xcodegen.log
+        run: xcodegen generate 2>&1 | tee xcodegen.log
 
       - name: Build (unsigned)
         run: |
@@ -100,9 +99,12 @@ jobs:
         run: |
           {
             echo "运行号：$GITHUB_RUN_ID"
-            echo ''
-            echo '```'
-            tail -n 150 build.log 2>/dev/null || echo "(no build.log)"
-            echo '```'
+            for f in fetch.log icon.log xcodegen.log build.log; do
+              echo ''
+              echo "### $f"
+              echo '```'
+              tail -n 120 "$f" 2>/dev/null || echo "(no $f)"
+              echo '```'
+            done
           } > fail-report.md
           gh issue create --title "构建失败 run-$GITHUB_RUN_ID" --body-file fail-report.md || true
